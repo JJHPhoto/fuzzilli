@@ -277,8 +277,7 @@ let environment = JavaScriptEnvironment(additionalBuiltins: profile.additionalBu
 let lifter = JavaScriptLifter(prefix: profile.codePrefix,
                               suffix: profile.codeSuffix,
                               inliningPolicy: InlineOnlyLiterals(),
-                              ecmaVersion: profile.ecmaVersion,
-                              environment: environment)
+                              ecmaVersion: profile.ecmaVersion)
 
 // Corpus managing interesting programs that have been found during fuzzing.
 let corpus = Corpus(minSize: minCorpusSize, maxSize: maxCorpusSize, minMutationsPerSample: minMutationsPerSample)

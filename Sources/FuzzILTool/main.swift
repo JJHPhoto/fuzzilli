@@ -16,6 +16,7 @@ import Foundation
 import Fuzzilli
 
 let jsFileExtension = ".js"
+// TODO make this ".fuzzil.protobuf" to match the content in fuzzdir/corpus?
 let protoBufFileExtension = ".il.protobuf"
 
 let corpus = Corpus(minSize: 1000, maxSize: 1000000, minMutationsPerSample: 600)
@@ -23,11 +24,12 @@ let jsPrefix = """
                """
 let jsSuffix = """
                """
-let lifter = JavaScriptLifter(prefix: jsPrefix,
+let jsLifter = JavaScriptLifter(prefix: jsPrefix,
                 suffix: jsSuffix,
                 inliningPolicy: NeverInline(),
-                ecmaVersion: ECMAScriptVersion.es6,
-                environment: JavaScriptEnvironment(additionalBuiltins: [:], additionalObjectGroups: []))
+                ecmaVersion: ECMAScriptVersion.es6)
+
+let fuzzILLifter = FuzzILLifter()
 
 
 func importFuzzILState(data: Data) throws {
@@ -36,7 +38,7 @@ func importFuzzILState(data: Data) throws {
 }
 
 // Takes a path, and stores each program to an individual file in that folder
-func dumpProtobufs(dumpPath: String) throws {
+func storeProtobufs(to dumpPath: String) throws {
     // Check if folder exists. If not, make it
     do {
         try FileManager.default.createDirectory(atPath: dumpPath, withIntermediateDirectories: true)
@@ -59,55 +61,45 @@ func dumpProtobufs(dumpPath: String) throws {
     }
 }
 
-// Dump a serialized protobuf file to a string
-func protobufToString(path: String) throws -> String {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
-    let proto = try Fuzzilli_Protobuf_Program(serializedData: data)
-    var resString = String()
-    dump(proto, to:&resString, maxDepth: 3)
-    return resString
-}
-
-// Convert a serialized protobuf file to a FuzzIL program
-func protobufToProgram(path: String) throws -> Program {
+// Loads a serialized FuzzIL program from the given file
+func loadProgram(from path: String) throws -> Program {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     let proto = try Fuzzilli_Protobuf_Program(serializedData: data)
     let program = try Program(from: proto)
     return program
 }
 
-// Take a program and lifts it to a JS script
-func liftToJS(prog: Program) -> String {
-    let res = lifter.lift(prog)
+// Take a program and lifts it to JavaScript
+func liftToJS(_ prog: Program) -> String {
+    let res = jsLifter.lift(prog)
     return res.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-// Prints a Fuzzilli program as a string
-func getPrettyStringProgram(program: Program) -> String {
-    var resString = String()
-    dump(program, to: &resString)
-    return resString.trimmingCharacters(in: .whitespacesAndNewlines)
+// Take a program and lifts it to FuzzIL's text format
+func liftToFuzzIL(_ prog: Program) -> String {
+    let res = fuzzILLifter.lift(prog)
+    return res.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 // Takes all .il.protobuf files in a directory, and lifts them to JS
 // Returns the number of files successfully converted
-func compileAllProtosToJS(dirPath: String) throws -> Int {
+func liftAllPrograms(in dirPath: String, with lifter: Lifter, fileExtension: String) throws -> Int {
     let fileEnumerator = FileManager.default.enumerator(atPath: dirPath)
     var count = 0
     while let fileName = fileEnumerator?.nextObject() as? String {
         guard fileName.hasSuffix(protoBufFileExtension) else { continue }
         let fullPath = dirPath + fileName
-        let prog = try protobufToProgram(path: fullPath)
-        let jsProgString = liftToJS(prog: prog)
-        let newFilePath = dirPath + String(fileName.dropLast(protoBufFileExtension.count)) + jsFileExtension
-        try jsProgString.write(to: URL(fileURLWithPath: newFilePath), atomically: false, encoding: String.Encoding.utf8)
+        let program = try loadProgram(from: fullPath)
+        let content = lifter.lift(program)
+        let newFilePath = dirPath + String(fileName.dropLast(protoBufFileExtension.count)) + fileExtension
+        try content.write(to: URL(fileURLWithPath: newFilePath), atomically: false, encoding: String.Encoding.utf8)
         count += 1
     }
     return count
 }
 
 // Provided a directory with a bunch of protobuf files, combine them all into a corpus file for consumption by Fuzzilli
-func combineProtobufs(dirPath: String, outputFile: String) throws -> Int {
+func combineProtobufs(in dirPath: String, into outputFile: String) throws -> Int {
     let fileEnumerator = FileManager.default.enumerator(atPath: dirPath)
     var failed_count = 0
     var progs = [Program]()
@@ -116,7 +108,7 @@ func combineProtobufs(dirPath: String, outputFile: String) throws -> Int {
         let fullPath = dirPath + fileName
         var prog = Program()
         do {
-            prog = try protobufToProgram(path: fullPath)
+            prog = try loadProgram(from: fullPath)
             progs.append(prog)
         } catch {
             print("Failed to convert to program \(fileName) with error \(error)")
@@ -131,47 +123,53 @@ func combineProtobufs(dirPath: String, outputFile: String) throws -> Int {
     return progs.count
 }
 
+func loadProgramOrExit(from path: String) -> Program {
+    do {
+        return try loadProgram(from: path)
+    } catch {
+        print("Failed to load program from \(path): \(error)")
+        exit(-1)
+    }
+}
+
 let args = Arguments.parse(from: CommandLine.arguments)
 
-if args["-h"] != nil || args["--help"] != nil || args.numPositionalArguments != 0 {
+if args["-h"] != nil || args["--help"] != nil || args.numPositionalArguments != 1 {
     print("""
           Usage:
-          \(args.programName) [options] 
+          \(args.programName) option path
 
           Options:
-              --fuzzILState=path          : Path of a FuzzIL state file 
-              --splitState=path           : Splits out a fuzzil profile into individual protobuf programs in specified file
-              --combineBuffs=path         : Combines all encoded protobufs in a folder into a single fuzzilli state.
-              --ILToJS=path               : Takes a single protobuf file and converts it to JS     
-              --printProtobufAsProg=path  : Takes a single protobuf file and pretty prints it as a Fuzzilli program
-              --printProtobuf=path        : Takes a single protobuf file and pretty prints it as a Protobuf
-              --dirILToJS=path            : Takes all of the .il.protobuf files in an directory, and produces .js files in that same directory  
-              --combineProtoDir=path      : combines all of the .il.protobuf files in a directory into a corpus.bin file for consumption by Fuzzilli
+              --fuzzILState=path     : Path of a FuzzIL state file to import first
+              --splitState           : Splits out a fuzzil profile into individual protobuf programs in specified file
+              --combineBuffs         : Combines all encoded protobufs in a folder into a single fuzzilli state.
+              --liftToJS             : Lifts the given protobuf program to JS and prints it
+              --liftToFuzzIL         : Lifts the given protobuf program to FuzzIL's text format and prints it
+              --dumpProtobuf         : Dumps the raw content of the given protobuf file
+              --dumpProgram          : Dumps the internal representation of the program stored in the given protobuf file
+              --liftAllToJS          : Takes all of the .il.protobuf files in an directory, and produces .js files in that same directory
+              --combineProtoDir      : Combines all of the .il.protobuf files in a directory into a corpus.bin file for consumption by Fuzzilli
           """)
     exit(0)
 }
 
+let path = args[0]
 
-let fuzzILPath = args["--fuzzILState"]
-let splitStatePath = args["--splitState"]
-let combineBuffsPath = args["--combineBuffs"]
-let ilToJSPath = args["--ILToJS"]
-let printProtoAsProgPath = args["--printProtobufAsProg"]
-let printProtoPath = args["--printProtobuf"]
-let dirILToJS = args["--dirILToJS"]
-let combineDir = args["--combineProtoDir"]
+// TODO can this be removed now that the fuzzing corpus is stored on disk as single files?
+let fuzzILState = args["--fuzzILState"]
 
-if splitStatePath != nil && fuzzILPath == nil {
+if args.has("--splitState") && fuzzILState == nil {
     print("Splitting state requires fuzzILState to be set")
     exit(-1)
 }
 
 // Split out an already built state
-if let splitPath = splitStatePath, let statePath = fuzzILPath {
+// TODO can this be removed now that the fuzzing corpus is stored on disk as single files?
+if let statePath = fuzzILState, args.has("--splitState") {
     do {
         let data = try Data(contentsOf: URL(fileURLWithPath: statePath))
         try importFuzzILState(data: data)
-        try dumpProtobufs(dumpPath: splitPath)
+        try storeProtobufs(to: path)
     } catch {
         print("Failed to import FuzzIL State with \(error)")
         exit(-1)
@@ -179,64 +177,56 @@ if let splitPath = splitStatePath, let statePath = fuzzILPath {
 }
 
 // Covert a single IL protobuf file to JS and print to stdout
-else if let ilPath = ilToJSPath {
-    var prog = Program()
-    do {
-        prog = try protobufToProgram(path: ilPath)
-    } catch {
-        print("Failed to load il proto \(ilPath) with error \(error)")
-        exit(-1)
-    }
-    let jsProgString = liftToJS(prog: prog)
-    print(jsProgString)
+else if args.has("--liftToJS") {
+    let program = loadProgramOrExit(from: path)
+    print(liftToJS(program))
+}
+
+// Covert a single IL protobuf file to FuzzIL's text format and print to stdout
+else if args.has("--liftToFuzzIL") {
+    let program = loadProgramOrExit(from: path)
+    print(liftToFuzzIL(program))
 }
 
 // Pretty print just the protobuf, without trying to load as a program
 // This allows the debugging of produced programs that are not syntactically valid
-else if let printPath = printProtoPath {
-    let res = try protobufToString(path: printPath)
-    print(res)
+else if args.has("--dumpProtobuf") {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let proto = try Fuzzilli_Protobuf_Program(serializedData: data)
+    dump(proto, maxDepth: 3)
 }
-
 
 // Pretty print a protobuf as a program on stdout
-else if let printPath = printProtoAsProgPath {
-    var prog = Program()
-    do {
-        prog = try protobufToProgram(path: printPath)
-    } catch {
-        print("Failed to load il proto \(printPath) with error \(error)")
-        exit(-1)
-    }
-    let prettyProgString = getPrettyStringProgram(program: prog)
-    print(prettyProgString)
+else if args.has("--dumpProgram") {
+    let program = loadProgramOrExit(from: path)
+    dump(program)
 }
 
-// Produce JS files from protobufs
-else if let dirPath = dirILToJS {
+// Lift all protobuf programs to JavaScript
+else if args.has("--liftAllToJS") {
     var isDir : ObjCBool = false
-    if !FileManager.default.fileExists(atPath: dirPath, isDirectory:&isDir) || !isDir.boolValue {
-        print("Provided directory \(dirPath) is not a valid directory path")
+    if !FileManager.default.fileExists(atPath: path, isDirectory:&isDir) || !isDir.boolValue {
+        print("Provided directory \(path) is not a valid directory path")
         exit(-1)
     }
     do {
-        let numConverted = try compileAllProtosToJS(dirPath: dirPath)
-        print("Successfully converted \(numConverted) files")
+        let numLifted = try liftAllPrograms(in: path, with: jsLifter, fileExtension: jsFileExtension)
+        print("Successfully lifted \(numLifted) files")
     } catch {
-        print("Failed to compile protos with error \(error)")
+        print("Failed to lift some programs: \(error)")
         exit(-1)
     }
 }
 
-// Combine a bunch of protobufs into a state json
-else if let dirPath = combineDir {
+// Combine multiple protobuf programs into a single corpus file
+else if args.has("--combineProtoDir") {
     var isDir : ObjCBool = false
-    if !FileManager.default.fileExists(atPath: dirPath, isDirectory:&isDir) || !isDir.boolValue {
-        print("Provided directory \(dirPath) is not a valid directory path")
+    if !FileManager.default.fileExists(atPath: path, isDirectory:&isDir) || !isDir.boolValue {
+        print("Provided directory \(path) is not a valid directory path")
         exit(-1)
     }
     do {
-        let numConverted = try combineProtobufs(dirPath: dirPath, outputFile: "corpus.bin")
+        let numConverted = try combineProtobufs(in: path, into: "corpus.bin")
         print("Successfully combined \(numConverted) files into corpus.bin")
     } catch {
         print("Failed to combine protos with error \(error)")
